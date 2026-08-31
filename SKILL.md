@@ -38,6 +38,10 @@ bash /c/workspace/tool/db-skill/db.sh <command> [args]
 ## Schema Cache
 
 - 포맷: DDL (`CREATE TABLE`) — LLM 토큰 효율 + text-to-SQL 정확도 최고
+- Db2/Oracle 캐시에서 `?` 는 **「카탈로그가 알려주지 않았다」**이지 「없다」가 아닙니다.
+  권한이 좁은 계정이면 인덱스·코멘트가 `?` 로 나옵니다.
+  카탈로그를 아예 못 읽은 경우 파일 머리에 `-- INCOMPLETE:` 줄이 붙습니다 — 그 줄이 있으면
+  **그 캐시에서 「없음」을 결론으로 삼지 마십시오.**
 - 위치: `~/.claude/db/schema/<alias>.schema.sql`
 - 자동 refresh: `DB_SCHEMA_MAX_AGE` 설정 (기본 `7d`, 예: `60m`, `1d`, `2w`)
 - `search`, `tables`, `desc` 실행 시 stale 캐시 자동 갱신
@@ -55,7 +59,13 @@ DB_PASS=changeme
 DB_NAME=kdi
 ```
 
-지원 DB_TYPE: `mariadb`, `mysql`, `postgres`, `sqlite`, `mssql`, `oracle`
+지원 DB_TYPE: `mariadb`, `mysql`, `postgres`, `sqlite`, `mssql`, `oracle` (usql 경유)
+             `db2` (`db_schema.py` 경유 — `pip install ibm_db` 필요)
+
+**Db2 는 usql 을 쓰지 않습니다.** usql 에서 Db2 는 ODBC 경유만 가능한데 그 경로가
+스키마 카탈로그 조회에서 깨집니다(NULL 컬럼에서 결과 절단 또는 panic — README 참조).
+`db.sh` 가 `DB_TYPE=db2` 를 보고 자동으로 `db_schema.py` 로 보내므로 명령은 동일합니다.
+Db2 프로파일의 `DB_NAME` 은 데이터베이스 이름, Oracle 은 서비스 이름입니다.
 
 ## Usage Examples
 

@@ -4,9 +4,18 @@
 
 set -e
 
-DB_DIR="${HOME}/.claude/db"
+# DB_DIR can be overridden to point at a different profile set (useful for
+# testing against a throwaway directory instead of your real profiles).
+DB_DIR="${DB_DIR:-${HOME}/.claude/db}"
 SCHEMA_DIR="${DB_DIR}/schema"
 SCHEMA_MAX_AGE="${DB_SCHEMA_MAX_AGE:-7d}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Engines that do NOT go through usql. See README ("usql + ODBC 의 한계").
+# Db2 is only reachable from usql via ODBC, and that path corrupts catalog reads,
+# which is exactly what dump/tables/desc/search depend on. It uses its native
+# driver through db_schema.py instead.
+NATIVE_TYPES="db2"
 
 # --- helpers ---
 
@@ -23,6 +32,20 @@ _load_profile() {
   CONN_STR="${DB_TYPE}://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
   # safe version for display — never expose password in output
   CONN_STR_SAFE="${DB_TYPE}://${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+}
+
+_is_native() {
+  case " ${NATIVE_TYPES} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# Route a command to db_schema.py. Same profile, same schema cache file.
+_native() {
+  local py
+  py=$(command -v python3 || command -v python) || {
+    echo "ERROR: python3 not found. '${DB_TYPE}' needs it (see README)." >&2
+    exit 1
+  }
+  "$py" "${SCRIPT_DIR}/db_schema.py" "$@"
 }
 
 _check_usql() {
@@ -47,6 +70,7 @@ _default_port() {
     postgres)      echo 5432 ;;
     mssql)         echo 1433 ;;
     oracle)        echo 1521 ;;
+    db2)           echo 50000 ;;
     sqlite)        echo "" ;;
     *)             echo 3306 ;;
   esac
@@ -176,7 +200,7 @@ cmd_add() {
 
   if [ -z "$project" ] || [ -z "$dbtype" ] || [ -z "$env" ]; then
     echo "Usage: db.sh add <project> <db_type> <env> [host] [port] [user] [dbname] [alias]"
-    echo "  db_type: mariadb|mysql|postgres|sqlite|mssql|oracle"
+    echo "  db_type: mariadb|mysql|postgres|sqlite|mssql|oracle|db2"
     echo "  env: dev|staging|prod"
     echo "Example: db.sh add kdi-partner mariadb dev localhost 3306 kdi kdi kdi_dev"
     exit 1
@@ -261,8 +285,9 @@ cmd_test() {
     echo "Usage: db.sh test <alias>"
     exit 1
   fi
-  _check_usql
   _load_profile "$alias"
+  if _is_native "$DB_TYPE"; then _native test "$alias"; return $?; fi
+  _check_usql
   echo "Testing ${alias} → ${CONN_STR_SAFE}..."
   local start_time end_time
   start_time=$(date +%s)
@@ -287,7 +312,6 @@ cmd_query() {
     echo "  format: table (default), csv, json"
     exit 1
   fi
-  _check_usql
 
   IFS=',' read -ra ALIAS_LIST <<< "$aliases"
   for alias in "${ALIAS_LIST[@]}"; do
@@ -295,6 +319,12 @@ cmd_query() {
     if [ ${#ALIAS_LIST[@]} -gt 1 ]; then
       echo "=== ${alias} ==="
     fi
+    if _is_native "$DB_TYPE"; then
+      _native query "$alias" "${sql}" "${format}"
+      if [ ${#ALIAS_LIST[@]} -gt 1 ]; then echo ""; fi
+      continue
+    fi
+    _check_usql
     case "$format" in
       csv)
         usql "${CONN_STR}" -c "${sql}" --csv 2>&1
@@ -318,8 +348,9 @@ cmd_dump() {
     echo "Usage: db.sh dump <alias>"
     exit 1
   fi
-  _check_usql
   _load_profile "$alias"
+  if _is_native "$DB_TYPE"; then _native dump "$alias"; return $?; fi
+  _check_usql
   mkdir -p "${SCHEMA_DIR}"
 
   local outfile="${SCHEMA_DIR}/${alias}.schema.sql"
@@ -396,9 +427,20 @@ cmd_tables() {
   fi
   _auto_refresh_if_stale "$alias"
   local file="${SCHEMA_DIR}/${alias}.schema.sql"
-  grep -o 'CREATE TABLE "[^"]*"' "$file" 2>/dev/null | sed 's/CREATE TABLE "//;s/"//' \
-    || grep -o 'CREATE TABLE [^ (]*' "$file" 2>/dev/null | sed 's/CREATE TABLE //' \
-    || echo "No tables found"
+  # Table names come in three shapes depending on the engine that produced the dump:
+  #   `users`                  MySQL/MariaDB (SHOW CREATE TABLE)
+  #   "orders"                 Postgres
+  #   "SCHEMA"."TABLE"         Db2/Oracle (schema-qualified)
+  # Match all three in one pass. Matching only the first quoted part would print the
+  # schema name once per table instead of the table names.
+  local names
+  names=$(grep -oE 'CREATE TABLE (`[^`]+`|"[^"]+"\."[^"]+"|"[^"]+"|[^ (]+)' "$file" 2>/dev/null \
+            | sed 's/^CREATE TABLE //; s/[`"]//g')
+  if [ -z "$names" ]; then
+    echo "No tables found"
+  else
+    echo "$names"
+  fi
 }
 
 cmd_desc() {
@@ -437,7 +479,8 @@ Schema:
 Config:
   DB_SCHEMA_MAX_AGE=7            Days before auto-refresh (env var, default: 7)
 
-DB types: mariadb, mysql, postgres, sqlite, mssql, oracle
+DB types: mariadb, mysql, postgres, sqlite, mssql, oracle   (via usql)
+          db2                                             (via db_schema.py + pip install ibm_db)
 Profiles: ~/.claude/db/*.env
 Schema:   ~/.claude/db/schema/*.schema.sql
 HELP
