@@ -360,7 +360,7 @@ cmd_dump() {
   case $DB_TYPE in
     mariadb|mysql)
       tables=$(usql "${CONN_STR}" -c "SHOW TABLES" 2>&1 \
-        | grep -v "Tables_in_\|---\|(.*rows)" \
+        | grep -v -e "Tables_in_\|---\|(.*rows)" \
         | sed 's/^ *//;s/ *$//' \
         | grep -v '^$')
       for t in $tables; do
@@ -374,12 +374,12 @@ cmd_dump() {
       ;;
     postgres)
       tables=$(usql "${CONN_STR}" -c "SELECT tablename FROM pg_tables WHERE schemaname='public'" 2>&1 \
-        | grep -v "tablename\|---\|(.*rows)" \
+        | grep -v -e "tablename\|---\|(.*rows)" \
         | sed 's/^ *//;s/ *$//' \
         | grep -v '^$')
       for t in $tables; do
         usql "${CONN_STR}" -c "SELECT 'CREATE TABLE \"${t}\" (' || string_agg(column_name || ' ' || data_type || CASE WHEN is_nullable='NO' THEN ' NOT NULL' ELSE '' END, ', ') || ');' FROM information_schema.columns WHERE table_name='${t}' AND table_schema='public'" 2>&1 \
-          | grep -v "---\|(.*rows)\|?column?" \
+          | grep -v -e "---\|(.*rows)\|?column?" \
           | sed 's/^ *//;s/ *$//' \
           | grep -v '^$' >> "$outfile"
         echo "" >> "$outfile"
